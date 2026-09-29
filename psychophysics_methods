@@ -111,6 +111,7 @@ const state = {
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 function setContrast(pct){
   pct=clamp(pct,0,100);
+  // White background (255). Nominal contrast 100% -> black, 0% -> white.
   const v=Math.round(255*(1-pct/100));
   $('stimulus').style.color=`rgb(${v},${v},${v})`;
 }
@@ -139,57 +140,103 @@ async function copyResults(){
 
 // 1) Adjustment method
 function startAdjustment(){
-  setupTask('調整法','自分で「ギリギリ見える」位置に合わせる','スライダーを動かして、Eが<b>ギリギリ見える</b>濃さにして確認ボタンを押してください。');
-  let current=50;
-  setContrast(current);
-  $('dynamicControls').innerHTML=`
-    <div class="value" id="adjVal">${current}%</div>
-    <input type="range" id="adjSlider" min="0" max="10" step="0.1" value="${current}">
-    <button onclick="finishAdjustment()">確定</button>
-  `;
-  const slider = $('adjSlider');
-  slider.min = "0"; slider.max = "30"; slider.step = "0.1"; slider.value = current;
-  slider.oninput = e => {
-    current = parseFloat(e.target.value);
-    $('adjVal').textContent = current.toFixed(1) + '%';
-    setContrast(current);
-  };
-}
-function finishAdjustment(){
-  const val = parseFloat($('adjSlider').value);
-  finish('adjustment','調整法',val,'あなたがギリギリ見えると判断したコントラストの閾値です。',startAdjustment);
+  setupTask('調整法','自分で「ギリギリ見える」位置に合わせる','スライダーを動かして、Eが<b>ギリギリ見える</b>濃さにしてください。3回測定します。');
+  const vals=[]; let trial=1; const starts=[35,18,50];
+  function run(){let val=starts[trial-1];setContrast(val);$('dynamicControls').innerHTML=`<div class="value" id="adjVal">${val}%</div><input id="adjSlider" type="range" min="0" max="60" step="0.5" value="${val}"><button id="adjSet">この濃さで決定</button>`;progress(trial-1,3,`測定 ${trial} / 3`);$('adjSlider').oninput=e=>{val=Number(e.target.value);setContrast(val);$('adjVal').textContent=val.toFixed(1)+'%'};$('adjSet').onclick=()=>{vals.push(val);trial++;if(trial<=3)run();else{progress(3,3);const m=mean(vals);finish('adjustment','調整法',m,`3回の平均です（${vals.map(v=>v.toFixed(1)).join(', ')}%）。自分で刺激を操作できる反面、期待や操作の癖が入りやすい方法です。`,startAdjustment)}}}
+  run();
 }
 
-// 2) Method of limits
-let limitsState = {};
+// 2) Method of limits: 4 series, 2 descending + 2 ascending, tap when transition occurs.
 function startLimits(){
-  setupTask('極限法','「見える」か「見えない」かを答える','刺激の濃さが徐々に変化します。見えたら「見える」、見えなくなったら「見えない」を押してください。');
-  limitsState = { series: 0, desc: true, current: 15, thresholds: [] };
-  nextLimitsTrial();
-}
-function nextLimitsTrial(){
-  if(limitsState.series >= 4){
-    const avg = limitsState.thresholds.reduce((a,b)=>a+b,0)/limitsState.thresholds.length;
-    finish('limits','極限法',avg,'上昇系列と下降系列の交替により、慣れや期待の誤差を相殺して求めた閾値です。',startLimits);
-    return;
+  setupTask('極限法','変化していく刺激の「切り替わり」を答える','刺激は一定方向に変化します。<b>見えなくなった瞬間</b>、または<b>見え始めた瞬間</b>にボタンを押してください。4系列です。');
+  const dirs=['down','up','down','up']; const thresholds=[]; let s=0, value=0;
+  function runSeries(){clearTimer();const dir=dirs[s];value=dir==='down'?35:0;setContrast(value);$('dynamicControls').innerHTML=`<div class="value" id="limVal">${value.toFixed(1)}%</div><button id="limTap">${dir==='down'?'見えなくなった':'見え始めた'}</button>`;progress(s,dirs.length,`系列 ${s+1} / ${dirs.length}：${dir==='down'?'濃 → 薄':'薄 → 濃'}`);
+    state.timer=setInterval(()=>{value+=dir==='down'?-0.35:0.35;value=clamp(value,0,35);setContrast(value);$('limVal').textContent=value.toFixed(1)+'%';if(value===0||value===35){record()}},120);
+    $('limTap').onclick=record;
   }
-  if(limitsState.desc){
-    limitsState.current = 15 - Math.random()*3;
-  } else {
-    limitsState.current = 0 + Math.random()*3;
+  function record(){clearTimer();thresholds.push(value);s++;if(s<dirs.length){setTimeout(runSeries,350)}else{progress(4,4);const m=mean(thresholds);finish('limits','極限法',m,`4系列の平均です（${thresholds.map(v=>v.toFixed(1)).join(', ')}%）。上昇系列と下降系列で反応位置がずれることがあります。`,startLimits)}}
+  runSeries();
+}
+
+// 3) Constant stimuli: low-contrast levels + catch trials, brief presentation.
+function startConstants(){
+  setupTask('恒常法','短時間だけ出る刺激へ「見えた／見えない」','刺激の濃さはランダムです。Eは<b>約0.5秒だけ</b>表示されます。消えたあとに、見えたかどうかを答えてください。低コントラスト刺激と0%のキャッチ試行を含む28試行です。');
+
+  // Revised for classroom phones: the previous minimum (2%) was too easy.
+  // 0% catch trials are excluded from threshold estimation.
+  const levels=[0.4,0.8,1.2,1.8,2.6,4.0];
+  const catches=[0,0,0,0];
+  const trials=shuffle([...levels.flatMap(x=>[x,x,x,x]), ...catches]);
+  const data=[]; let i=0; let locked=false;
+
+  function next(){
+    if(i>=trials.length) return analyze();
+    locked=true;
+    const v=trials[i];
+    progress(i,trials.length,`試行 ${i+1} / ${trials.length}`);
+    $('dynamicControls').innerHTML='<div class="hint" style="text-align:center">画面中央を見てください…</div>';
+    setContrast(0);
+
+    // Blank interval, then brief stimulus, then response screen.
+    setTimeout(()=>{
+      setContrast(v);
+      setTimeout(()=>{
+        setContrast(0);
+        locked=false;
+        $('dynamicControls').innerHTML=`<div class="controls two"><button id="yes">見えた</button><button class="secondary" id="no">見えない</button></div>`;
+        $('yes').onclick=()=>answer(1);
+        $('no').onclick=()=>answer(0);
+      },500);
+    },300);
+
+    function answer(resp){
+      if(locked) return;
+      locked=true;
+      data.push({v,resp});
+      i++;
+      $('dynamicControls').innerHTML='<div class="hint" style="text-align:center">次の刺激へ…</div>';
+      setTimeout(next,250);
+    }
   }
-  limitsState.lastResponse = null;
-  runLimitsStep();
+
+  function analyze(){
+    progress(trials.length,trials.length);
+    const props=levels.map(v=>({v,p:mean(data.filter(d=>d.v===v).map(d=>d.resp))}));
+    let thr=levels[levels.length-1]; // simple interpolation of the 50%-seen point
+    if(props[0].p>=.5) thr=props[0].v;
+    else if(props[props.length-1].p<.5) thr=props[props.length-1].v;
+    else {
+      for(let j=1;j<props.length;j++){
+        if(props[j].p>=.5){
+          const a=props[j-1],b=props[j];
+          const denom=(b.p-a.p)||1;
+          thr=a.v+(.5-a.p)*(b.v-a.v)/denom;
+          break;
+        }
+      }
+    }
+    const catchData=data.filter(d=>d.v===0);
+    const falseAlarms=catchData.reduce((n,d)=>n+d.resp,0);
+    finish('constants','恒常法',thr,`「見えた」確率が50%になる点を簡易推定しました。0%刺激（キャッチ試行）4回中、「見えた」は${falseAlarms}回でした。短時間・ランダム提示にすると、刺激を探し続ける影響を抑えられます。`,startConstants);
+  }
+
+  next();
 }
-function runLimitsStep(){
-  setContrast(limitsState.current);
-  progress(limitsState.series, 4, `系列 ${limitsState.series + 1} / 4`);
-  $('dynamicControls').innerHTML = `
-    <div class="hint" style="text-align:center">文字が見えますか？</div>
-    <div class="controls two">
-      <button onclick="respondLimits(true)">見える</button>
-      <button class="secondary" onclick="respondLimits(false)">見えない</button>
-    </div>
-  `;
+
+// 4) Staircase: 1-up / 1-down, 18 trials, threshold = mean of reversal levels after first 2 reversals.
+function startStaircase(){
+  setupTask('上下法','回答に応じて次の刺激を変える','<b>見えたら薄く</b>、<b>見えなければ濃く</b>なります。反応の切り替わり付近を効率よく探します。18試行です。');
+  let v=18,step=3,i=0,lastDir=null;const reversals=[];const history=[];
+  function next(){if(i>=18)return analyze();setContrast(v);$('dynamicControls').innerHTML=`<div class="controls two"><button id="yes">見えた</button><button class="secondary" id="no">見えない</button></div>`;progress(i,18,`試行 ${i+1} / 18`);$('yes').onclick=()=>answer(true);$('no').onclick=()=>answer(false)}
+  function answer(seen){const dir=seen?'down':'up';history.push({v,seen});if(lastDir&&dir!==lastDir){reversals.push(v);if(reversals.length===2)step=2;if(reversals.length===5)step=1}lastDir=dir;v=clamp(v+(seen?-step:step),0.5,40);i++;setContrast(0);setTimeout(next,180)}
+  function analyze(){progress(18,18);const use=reversals.slice(2);const thr=use.length?mean(use):mean(history.slice(-6).map(x=>x.v));finish('staircase','上下法',thr,`反応方向が切り替わった点（反転点）から簡易推定しました。必要な領域に試行を集中できるのが特徴です。`,startStaircase)}
+  next();
 }
-function respondLimits(visible){
+
+function mean(a){return a.length?a.reduce((x,y)=>x+y,0)/a.length:NaN}
+function shuffle(a){a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a}
+
+renderResults();setContrast(20);
+</script>
+</body>
+</html>
